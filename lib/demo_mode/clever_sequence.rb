@@ -47,7 +47,16 @@ class CleverSequence
   end
 
   def next
-    @last_value = last_value + 1
+    if CleverSequence.use_database_sequences?
+      @last_value = DatabaseBackend.nextval(
+        klass,
+        attribute,
+        block,
+        throw_if_sequence_not_found: CleverSequence.enforce_sequences_exist?,
+      )
+    else
+      @last_value = last_value + 1
+    end
     last
   end
 

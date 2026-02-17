@@ -32,7 +32,18 @@ class CleverSequence
             # Ignore if no transaction to rollback
           end
 
-          return calculate_sequence_value(klass, attribute, block) + 1 unless throw_if_sequence_not_found
+          start_value = calculate_sequence_value(klass, attribute, block) + 1
+
+          # Publish notification for consumers to collect missing sequences
+          ActiveSupport::Notifications.instrument(
+            'clever_sequence.sequence_not_found',
+            sequence_name: name,
+            klass: klass,
+            attribute: attribute,
+            start_value: start_value,
+          )
+
+          return start_value unless throw_if_sequence_not_found
 
           raise SequenceNotFoundError.new(sequence_name: name, klass: klass, attribute: attribute)
         else
