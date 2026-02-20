@@ -6,7 +6,10 @@ module DemoMode
 
     # Called by Delayed::Plugins::LoggingPlugin to log job arguments.
     # Returns a hash of arguments to be logged as structured data.
+    # Uses `arguments` (available on ActiveJob instances) rather than instance
+    # variables, since the LoggingPlugin deserializes the job after execution.
     def loggable_arguments
+      session = arguments.first
       return {} unless session
 
       {
