@@ -24,10 +24,16 @@ class CleverSequence
     end
 
     class << self
+      attr_accessor :adjust_sequences_enabled
+
       def nextval(klass, attribute, block)
         name = sequence_name(klass, attribute)
 
         if sequence_exists?(name)
+          # On first use with adjustment enabled, ensure sequence is past existing data
+          if adjust_sequences_enabled && !sequence_cache[name].is_a?(SequenceResult::Exists)
+            adjust_sequence_if_needed(name, klass, attribute, block)
+          end
           sequence_cache[name] = SequenceResult::Exists.new(name)
 
           result = ActiveRecord::Base.connection.execute(
@@ -68,6 +74,10 @@ class CleverSequence
         @sequence_cache ||= {}
       end
 
+      def clear_sequence_cache!
+        @sequence_cache = {}
+      end
+
       private
 
       def sequence_exists?(sequence_name)
@@ -92,6 +102,18 @@ class CleverSequence
         ActiveRecord::Base.with_transactional_lock("lower-bound-#{klass}-#{column_name}") do
           LowerBoundFinder.new(klass, column_name, block).lower_bound
         end
+      end
+
+      def adjust_sequence_if_needed(sequence_name, klass, attribute, block)
+        max_value = calculate_sequence_value(klass, attribute, block)
+        return if max_value < 1
+
+        # setval sets the sequence's last_value. With the default 3rd argument (true),
+        # the next nextval() will return last_value + 1.
+        # We only want to advance (never go backwards), so we use GREATEST.
+        ActiveRecord::Base.connection.execute(<<~SQL.squish)
+          SELECT setval('#{sequence_name}', GREATEST(#{max_value}, (SELECT last_value FROM #{sequence_name})))
+        SQL
       end
     end
   end

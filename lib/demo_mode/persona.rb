@@ -68,9 +68,28 @@ module DemoMode
         CleverSequence.reset! if defined?(CleverSequence)
         DemoMode.current_password = password if password
         DemoMode.around_persona_generation.call(variant.signinable_generator, **options)
+      rescue ActiveRecord::RecordNotUnique => e
+        raise unless retry_with_sequence_adjustment?(e)
+
+        CleverSequence.reset!
+        CleverSequence::PostgresBackend.clear_sequence_cache!
+        CleverSequence::PostgresBackend.adjust_sequences_enabled = true
+        DemoMode.around_persona_generation.call(variant.signinable_generator, **options)
       ensure
         DemoMode.current_password = nil
+        CleverSequence::PostgresBackend.adjust_sequences_enabled = false if defined?(CleverSequence::PostgresBackend)
       end
+    end
+
+    def retry_with_sequence_adjustment?(error)
+      return false unless defined?(CleverSequence) && CleverSequence.use_database_sequences?
+
+      # Only retry if we haven't already enabled adjustment (prevent infinite loop)
+      return false if CleverSequence::PostgresBackend.adjust_sequences_enabled
+
+      # Log for observability
+      Rails.logger.warn("[DemoMode] Uniqueness violation during persona generation, retrying with sequence adjustment: #{error.message}")
+      true
     end
 
     def callout(callout = true) # rubocop:disable Style/OptionalBooleanParameter

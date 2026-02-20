@@ -68,6 +68,101 @@ RSpec.describe CleverSequence::PostgresBackend do
       expect(cached).to be_a(CleverSequence::PostgresBackend::SequenceResult::Exists)
       expect(cached.sequence_name).to eq sequence_name
     end
+
+    context 'when existing data conflicts with sequence start value' do
+      before do
+        described_class.instance_variable_set(:@sequence_cache, nil)
+        # Create widgets with integer_column values 1, 2, 3, 4, 5
+        (1..5).each { |i| Widget.create!(integer_column: i) }
+      end
+
+      after do
+        Widget.delete_all
+        described_class.adjust_sequences_enabled = false
+      end
+
+      context 'when adjust_sequences_enabled is false' do
+        it 'does not adjust sequence and returns conflicting values' do
+          # Without adjustment, sequence returns 1, 2, 3... which conflict
+          result = described_class.nextval(klass, attribute, block)
+          expect(result).to eq 1
+        end
+      end
+
+      context 'when adjust_sequences_enabled is true' do
+        before { described_class.adjust_sequences_enabled = true }
+
+        it 'adjusts sequence to skip past existing values' do
+          # Sequence starts at 1, but values 1-5 already exist
+          # First nextval should return 6 (after adjustment)
+          result = described_class.nextval(klass, attribute, block)
+          expect(result).to eq 6
+        end
+
+        it 'returns sequential values after adjustment' do
+          result_1 = described_class.nextval(klass, attribute, block)
+          result_2 = described_class.nextval(klass, attribute, block)
+          result_3 = described_class.nextval(klass, attribute, block)
+
+          expect(result_1).to eq 6
+          expect(result_2).to eq 7
+          expect(result_3).to eq 8
+        end
+
+        it 'only adjusts sequence on first use' do
+          execute_calls = []
+          allow(ActiveRecord::Base.connection).to receive(:execute).and_wrap_original do |method, *args|
+            execute_calls << args[0]
+            method.call(*args)
+          end
+
+          described_class.nextval(klass, attribute, block)
+          described_class.nextval(klass, attribute, block)
+          described_class.nextval(klass, attribute, block)
+
+          setval_queries = execute_calls.grep(/setval/)
+          expect(setval_queries.count).to eq 1
+        end
+      end
+    end
+
+    context 'when sequence is already past existing data' do
+      before do
+        described_class.instance_variable_set(:@sequence_cache, nil)
+        described_class.adjust_sequences_enabled = true
+        # Create widgets with low values
+        Widget.create!(integer_column: 1)
+        Widget.create!(integer_column: 2)
+        # Advance the sequence past existing data
+        ActiveRecord::Base.connection.execute(
+          "SELECT setval('#{sequence_name}', 100)",
+        )
+      end
+
+      after do
+        Widget.delete_all
+        described_class.adjust_sequences_enabled = false
+      end
+
+      it 'does not go backwards' do
+        # Sequence is at 100, existing data only goes to 2
+        # Should return 101, not 3
+        result = described_class.nextval(klass, attribute, block)
+        expect(result).to eq 101
+      end
+    end
+
+    context 'when no existing data' do
+      before do
+        described_class.instance_variable_set(:@sequence_cache, nil)
+        Widget.delete_all
+      end
+
+      it 'returns values starting from 1' do
+        result = described_class.nextval(klass, attribute, block)
+        expect(result).to eq 1
+      end
+    end
   end
 
   context 'when sequence does not exist' do
@@ -152,6 +247,74 @@ RSpec.describe CleverSequence::PostgresBackend do
       expect(name.length).to eq 64
       expect(name).to start_with('cs_')
       expect(name).to match(/^cs_a{30}_b{30}$/)
+    end
+  end
+
+  describe '.clear_sequence_cache!' do
+    let(:sequence_name) { described_class.sequence_name(klass, attribute) }
+
+    before do
+      ActiveRecord::Base.connection.execute(
+        "CREATE SEQUENCE IF NOT EXISTS #{sequence_name} START WITH 1",
+      )
+      described_class.instance_variable_set(:@sequence_cache, nil)
+    end
+
+    after do
+      ActiveRecord::Base.connection.execute(
+        "DROP SEQUENCE IF EXISTS #{sequence_name}",
+      )
+    end
+
+    it 'clears the sequence cache' do
+      # Populate the cache
+      described_class.nextval(klass, attribute, block)
+      expect(described_class.sequence_cache).not_to be_empty
+
+      # Clear it
+      described_class.clear_sequence_cache!
+      expect(described_class.sequence_cache).to be_empty
+    end
+
+    it 'allows adjustment to run again after clearing' do
+      Widget.create!(integer_column: 1)
+      described_class.adjust_sequences_enabled = true
+
+      # First call adjusts the sequence (finds max consecutive value of 1)
+      result_1 = described_class.nextval(klass, attribute, block)
+      expect(result_1).to eq 2
+
+      # Add more consecutive data (2, 3, 4, 5)
+      (2..5).each { |i| Widget.create!(integer_column: i) }
+
+      # Without clearing, adjustment doesn't run again
+      result_2 = described_class.nextval(klass, attribute, block)
+      expect(result_2).to eq 3
+
+      # Clear cache and reset sequence to simulate retry
+      described_class.clear_sequence_cache!
+      ActiveRecord::Base.connection.execute("ALTER SEQUENCE #{sequence_name} RESTART WITH 1")
+
+      # Now adjustment runs again and finds max consecutive value of 5
+      result_3 = described_class.nextval(klass, attribute, block)
+      expect(result_3).to eq 6
+    ensure
+      Widget.delete_all
+      described_class.adjust_sequences_enabled = false
+    end
+  end
+
+  describe '.adjust_sequences_enabled' do
+    it 'defaults to nil/falsey' do
+      described_class.adjust_sequences_enabled = nil
+      expect(described_class.adjust_sequences_enabled).to be_falsey
+    end
+
+    it 'can be set to true' do
+      described_class.adjust_sequences_enabled = true
+      expect(described_class.adjust_sequences_enabled).to be true
+    ensure
+      described_class.adjust_sequences_enabled = false
     end
   end
 end
