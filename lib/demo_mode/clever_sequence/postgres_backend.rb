@@ -24,7 +24,13 @@ class CleverSequence
     end
 
     class << self
-      attr_accessor :adjust_sequences_enabled
+      def adjust_sequences_enabled
+        Thread.current[:clever_sequence_adjust_sequences_enabled]
+      end
+
+      def adjust_sequences_enabled=(value)
+        Thread.current[:clever_sequence_adjust_sequences_enabled] = value
+      end
 
       def nextval(klass, attribute, block)
         name = sequence_name(klass, attribute)
