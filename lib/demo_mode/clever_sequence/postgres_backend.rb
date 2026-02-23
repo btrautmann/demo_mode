@@ -24,12 +24,11 @@ class CleverSequence
     end
 
     class << self
-      def adjust_sequences_enabled
-        Thread.current[:clever_sequence_adjust_sequences_enabled]
-      end
-
-      def adjust_sequences_enabled=(value)
-        Thread.current[:clever_sequence_adjust_sequences_enabled] = value
+      def with_sequence_adjustment
+        Thread.current[:clever_sequence_adjust_sequences_enabled] = true
+        yield
+      ensure
+        Thread.current[:clever_sequence_adjust_sequences_enabled] = false
       end
 
       def nextval(klass, attribute, block)
@@ -37,7 +36,7 @@ class CleverSequence
 
         if sequence_exists?(name)
           # On first use with adjustment enabled, ensure sequence is past existing data
-          if adjust_sequences_enabled && !sequence_cache[name].is_a?(SequenceResult::Exists)
+          if adjust_sequences_enabled? && !sequence_cache[name].is_a?(SequenceResult::Exists)
             adjust_sequence_if_needed(name, klass, attribute, block)
           end
           sequence_cache[name] = SequenceResult::Exists.new(name)
@@ -85,6 +84,10 @@ class CleverSequence
       end
 
       private
+
+      def adjust_sequences_enabled?
+        Thread.current[:clever_sequence_adjust_sequences_enabled]
+      end
 
       def sequence_exists?(sequence_name)
         if sequence_cache.key?(sequence_name)
