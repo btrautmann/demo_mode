@@ -69,7 +69,7 @@ module DemoMode
         CleverSequence.reset! if defined?(CleverSequence)
         DemoMode.current_password = password if password
         DemoMode.around_persona_generation.call(variant.signinable_generator, **options)
-      rescue ActiveRecord::RecordNotUnique => e
+      rescue ActiveRecord::RecordNotUnique, ActiveRecord::RecordInvalid => e
         raise if retried || !should_retry_with_sequence_adjustment?(e)
 
         retried = true
