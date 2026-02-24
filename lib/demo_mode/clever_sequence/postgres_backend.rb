@@ -61,7 +61,8 @@ class CleverSequence
         attr = attribute.to_s.gsub(/[^a-z0-9_]/i, '_')
         # Handle PostgreSQL identifier limit:
         limit = (63 - SEQUENCE_PREFIX.length) / 2
-        "#{SEQUENCE_PREFIX}#{table[0, limit]}_#{attr[0, limit]}"
+        # Lowercase to avoid PostgreSQL case-sensitivity issues with unquoted identifiers
+        "#{SEQUENCE_PREFIX}#{table[0, limit]}_#{attr[0, limit]}".downcase
       end
 
       def sequence_cache
