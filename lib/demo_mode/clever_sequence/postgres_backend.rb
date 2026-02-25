@@ -46,14 +46,31 @@ class CleverSequence
           )
           result.first['nextval'].to_i
         else
-          start_value = calculate_sequence_value(klass, attribute, block)
+          # Check if we already have this sequence cached as Missing
+          cached = sequence_cache[name]
 
-          sequence_cache[name] = SequenceResult::Missing.new(
-            sequence_name: name,
-            klass: klass,
-            attribute: attribute,
-            calculated_start_value: start_value + 1,
-          )
+          if cached.is_a?(SequenceResult::Missing)
+            # Increment from cached value instead of recalculating from DB
+            # This handles the case where transactions are rolled back but we
+            # need to continue generating unique values
+            next_value = cached.calculated_start_value + 1
+            sequence_cache[name] = SequenceResult::Missing.new(
+              sequence_name: name,
+              klass: klass,
+              attribute: attribute,
+              calculated_start_value: next_value,
+            )
+          else
+            # First time seeing this missing sequence - calculate from DB
+            start_value = calculate_sequence_value(klass, attribute, block)
+            next_value = start_value + 1
+            sequence_cache[name] = SequenceResult::Missing.new(
+              sequence_name: name,
+              klass: klass,
+              attribute: attribute,
+              calculated_start_value: next_value,
+            )
+          end
 
           if CleverSequence.enforce_sequences_exist
             raise SequenceNotFoundError.new(
@@ -62,7 +79,7 @@ class CleverSequence
               attribute: attribute,
             )
           else
-            start_value + 1
+            next_value
           end
         end
       end
@@ -81,7 +98,9 @@ class CleverSequence
       end
 
       def clear_sequence_cache!
-        @sequence_cache = {}
+        # Preserve Missing entries since those are needed for sequence discovery
+        # Only clear Exists entries so sequences get re-checked and potentially adjusted
+        @sequence_cache = sequence_cache.select { |_, v| v.is_a?(SequenceResult::Missing) }
       end
 
       private
