@@ -307,6 +307,48 @@ RSpec.describe CleverSequence::PostgresBackend do
     end
   end
 
+  describe 'thread safety' do
+    let(:sequence_name) { described_class.sequence_name(klass, :nonexistent_column) }
+    let(:nonexistent_attribute) { :nonexistent_column }
+
+    before do
+      ActiveRecord::Base.connection.execute(
+        "DROP SEQUENCE IF EXISTS #{sequence_name}",
+      )
+      described_class.instance_variable_set(:@sequence_cache, nil)
+      CleverSequence.enforce_sequences_exist = false
+    end
+
+    after do
+      CleverSequence.enforce_sequences_exist = false
+    end
+
+    it 'returns unique values when nextval is called concurrently from multiple threads' do
+      thread_count = 10
+
+      # Seed the cache with a Missing entry so all threads exercise the
+      # cached read-increment-write path without needing DB connections.
+      described_class.nextval(klass, nonexistent_attribute, block)
+
+      go = false
+
+      threads = thread_count.times.map do
+        Thread.new do
+          Thread.pass until go
+          described_class.nextval(klass, nonexistent_attribute, block)
+        end
+      end
+
+      go = true
+
+      values = threads.map(&:value)
+
+      expect(values).to all(be_an(Integer))
+      expect(values.uniq.size).to eq(thread_count),
+        "Expected #{thread_count} unique values but got duplicates: #{values.sort}"
+    end
+  end
+
   describe '.with_sequence_adjustment' do
     it 'enables adjustment within the block' do
       enabled_inside = nil

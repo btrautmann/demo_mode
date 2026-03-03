@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require 'monitor'
+
 class CleverSequence
   module PostgresBackend
     SEQUENCE_PREFIX = 'cs_'
@@ -23,6 +25,10 @@ class CleverSequence
       Missing = Data.define(:sequence_name, :klass, :attribute, :calculated_start_value)
     end
 
+    # Initialized eagerly at load time (single-threaded), so no race on creation.
+    # Monitor is reentrant, allowing nextval -> sequence_exists? nesting.
+    @sequence_monitor = Monitor.new
+
     class << self
       def with_sequence_adjustment
         Rails.logger.info("[DemoMode] Enabling sequence adjustment for retry")
@@ -34,62 +40,64 @@ class CleverSequence
       end
 
       def nextval(klass, attribute, block)
-        name = sequence_name(klass, attribute)
-        Rails.logger.info("[DemoMode] nextval called for #{klass.name}##{attribute} (sequence: #{name})")
+        @sequence_monitor.synchronize do
+          name = sequence_name(klass, attribute)
+          Rails.logger.info("[DemoMode] nextval called for #{klass.name}##{attribute} (sequence: #{name})")
 
-        if sequence_exists?(name)
-          # On first use with adjustment enabled, ensure sequence is past existing data
-          if adjust_sequences_enabled? && !sequence_cache[name].is_a?(SequenceResult::Exists)
-            Rails.logger.info("[DemoMode] Sequence adjustment enabled and #{name} not yet adjusted, adjusting now for #{klass.name}##{attribute}")
-            adjust_sequence_if_needed(name, klass, attribute, block)
-          end
-          sequence_cache[name] = SequenceResult::Exists.new(name)
+          if sequence_exists?(name)
+            # On first use with adjustment enabled, ensure sequence is past existing data
+            if adjust_sequences_enabled? && !sequence_cache[name].is_a?(SequenceResult::Exists)
+              Rails.logger.info("[DemoMode] Sequence adjustment enabled and #{name} not yet adjusted, adjusting now for #{klass.name}##{attribute}")
+              adjust_sequence_if_needed(name, klass, attribute, block)
+            end
+            sequence_cache[name] = SequenceResult::Exists.new(name)
 
-          result = ActiveRecord::Base.connection.execute(
-            "SELECT nextval('#{name}')",
-          )
-          value = result.first['nextval'].to_i
-          Rails.logger.info("[DemoMode] nextval for #{klass.name}##{attribute} returned #{value} from postgres sequence #{name}")
-          value
-        else
-          # Check if we already have this sequence cached as Missing
-          cached = sequence_cache[name]
-
-          if cached.is_a?(SequenceResult::Missing)
-            # Increment from cached value instead of recalculating from DB
-            # This handles the case where transactions are rolled back but we
-            # need to continue generating unique values
-            next_value = cached.calculated_start_value + 1
-            Rails.logger.info("[DemoMode] Sequence #{name} missing (cached), incrementing from cached value #{cached.calculated_start_value} to #{next_value} for #{klass.name}##{attribute}")
-            sequence_cache[name] = SequenceResult::Missing.new(
-              sequence_name: name,
-              klass: klass,
-              attribute: attribute,
-              calculated_start_value: next_value,
+            result = ActiveRecord::Base.connection.execute(
+              "SELECT nextval('#{name}')",
             )
+            value = result.first['nextval'].to_i
+            Rails.logger.info("[DemoMode] nextval for #{klass.name}##{attribute} returned #{value} from postgres sequence #{name}")
+            value
           else
-            # First time seeing this missing sequence - calculate from DB
-            start_value = calculate_sequence_value(klass, attribute, block)
-            next_value = start_value + 1
-            Rails.logger.info("[DemoMode] Sequence #{name} missing (first encounter), calculated start_value=#{start_value}, returning next_value=#{next_value} for #{klass.name}##{attribute}")
-            sequence_cache[name] = SequenceResult::Missing.new(
-              sequence_name: name,
-              klass: klass,
-              attribute: attribute,
-              calculated_start_value: next_value,
-            )
-          end
+            # Check if we already have this sequence cached as Missing
+            cached = sequence_cache[name]
 
-          if CleverSequence.enforce_sequences_exist
-            Rails.logger.warn("[DemoMode] Raising SequenceNotFoundError for #{klass.name}##{attribute} (sequence: #{name}, enforce_sequences_exist is enabled)")
-            raise SequenceNotFoundError.new(
-              sequence_name: name,
-              klass: klass,
-              attribute: attribute,
-            )
-          else
-            Rails.logger.info("[DemoMode] nextval for #{klass.name}##{attribute} returning #{next_value} (fallback, sequence #{name} does not exist)")
-            next_value
+            if cached.is_a?(SequenceResult::Missing)
+              # Increment from cached value instead of recalculating from DB
+              # This handles the case where transactions are rolled back but we
+              # need to continue generating unique values
+              next_value = cached.calculated_start_value + 1
+              Rails.logger.info("[DemoMode] Sequence #{name} missing (cached), incrementing from cached value #{cached.calculated_start_value} to #{next_value} for #{klass.name}##{attribute}")
+              sequence_cache[name] = SequenceResult::Missing.new(
+                sequence_name: name,
+                klass: klass,
+                attribute: attribute,
+                calculated_start_value: next_value,
+              )
+            else
+              # First time seeing this missing sequence - calculate from DB
+              start_value = calculate_sequence_value(klass, attribute, block)
+              next_value = start_value + 1
+              Rails.logger.info("[DemoMode] Sequence #{name} missing (first encounter), calculated start_value=#{start_value}, returning next_value=#{next_value} for #{klass.name}##{attribute}")
+              sequence_cache[name] = SequenceResult::Missing.new(
+                sequence_name: name,
+                klass: klass,
+                attribute: attribute,
+                calculated_start_value: next_value,
+              )
+            end
+
+            if CleverSequence.enforce_sequences_exist
+              Rails.logger.warn("[DemoMode] Raising SequenceNotFoundError for #{klass.name}##{attribute} (sequence: #{name}, enforce_sequences_exist is enabled)")
+              raise SequenceNotFoundError.new(
+                sequence_name: name,
+                klass: klass,
+                attribute: attribute,
+              )
+            else
+              Rails.logger.info("[DemoMode] nextval for #{klass.name}##{attribute} returning #{next_value} (fallback, sequence #{name} does not exist)")
+              next_value
+            end
           end
         end
       end
@@ -108,11 +116,13 @@ class CleverSequence
       end
 
       def clear_sequence_cache!
-        # Preserve Missing entries since those are needed for sequence discovery
-        # Only clear Exists entries so sequences get re-checked and potentially adjusted
-        existing_keys = sequence_cache.select { |_, v| v.is_a?(SequenceResult::Exists) }.keys
-        Rails.logger.info("[DemoMode] Clearing sequence cache: removing #{existing_keys.size} Exists entries (#{existing_keys.join(', ')}), preserving #{sequence_cache.size - existing_keys.size} Missing entries")
-        @sequence_cache = sequence_cache.select { |_, v| v.is_a?(SequenceResult::Missing) }
+        @sequence_monitor.synchronize do
+          # Preserve Missing entries since those are needed for sequence discovery
+          # Only clear Exists entries so sequences get re-checked and potentially adjusted
+          existing_keys = sequence_cache.select { |_, v| v.is_a?(SequenceResult::Exists) }.keys
+          Rails.logger.info("[DemoMode] Clearing sequence cache: removing #{existing_keys.size} Exists entries (#{existing_keys.join(', ')}), preserving #{sequence_cache.size - existing_keys.size} Missing entries")
+          @sequence_cache = sequence_cache.select { |_, v| v.is_a?(SequenceResult::Missing) }
+        end
       end
 
       private
