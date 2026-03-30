@@ -22,6 +22,10 @@ RSpec.describe DemoMode::AccountGenerationJob do
         name: 'the_everyperson',
         variant: 'default',
       )
+      .and emit_notification('demo_mode.account_generation').with_payload(
+        persona_name: 'the_everyperson',
+        variant: 'default',
+      )
   end
 
   context 'when the persona must exist' do
@@ -37,6 +41,12 @@ RSpec.describe DemoMode::AccountGenerationJob do
       }.to raise_error(RuntimeError, 'Unknown persona: garbage')
         .and change { session.reload.status }.from('processing').to('failed')
         .and not_emit_notification('demo_mode.persona.generate')
+        .and emit_notification('demo_mode.account_generation').with_payload(
+          persona_name: 'garbage',
+          variant: 'default',
+          exception: ["RuntimeError", "Unknown persona: garbage"],
+          exception_object: kind_of(RuntimeError),
+        )
     end
   end
 
@@ -52,6 +62,12 @@ RSpec.describe DemoMode::AccountGenerationJob do
         .and change { session.reload.status }.from('processing').to('failed')
         .and emit_notification('demo_mode.persona.generate').with_payload(
           name: 'the_everyperson',
+          variant: 'erroring',
+          exception: ["RuntimeError", "Oops! Error error!"],
+          exception_object: kind_of(RuntimeError),
+        )
+        .and emit_notification('demo_mode.account_generation').with_payload(
+          persona_name: 'the_everyperson',
           variant: 'erroring',
           exception: ["RuntimeError", "Oops! Error error!"],
           exception_object: kind_of(RuntimeError),
