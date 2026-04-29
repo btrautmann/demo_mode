@@ -109,5 +109,13 @@ RSpec.describe DemoMode::AccountGenerationJob do
           exception_object: kind_of(RuntimeError),
         )
     end
+
+    it 'persists the failed status even when called inside an outer transaction' do
+      new_session = DemoMode::Session.new(persona_name: :the_everyperson, variant: :erroring, pool_session: true)
+      expect {
+        new_session.save_and_generate_account!
+      }.to raise_error(RuntimeError, 'Oops! Error error!')
+      expect(new_session.reload.status).to eq('failed')
+    end
   end
 end
